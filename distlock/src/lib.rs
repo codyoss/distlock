@@ -1,4 +1,3 @@
-use std::env;
 use std::error::Error as StdError;
 
 mod auth;
@@ -11,6 +10,38 @@ pub struct Error {
 }
 
 impl Error {
+    fn new(msg: impl Into<String>) -> Self {
+        Error {
+            msg: Some(msg.into()),
+            inner: None,
+            kind: ErrorKind::Other,
+        }
+    }
+
+    fn wrap_msg(msg: impl Into<String>, error: BoxError) -> Self {
+        Error {
+            msg: Some(msg.into()),
+            inner: Some(error),
+            kind: ErrorKind::Other,
+        }
+    }
+
+    fn wrap(error: impl Into<BoxError>) -> Self {
+        Error {
+            msg: None,
+            inner: Some(error.into()),
+            kind: ErrorKind::Other,
+        }
+    }
+
+    fn lock_held(msg: impl Into<String>, error: Option<BoxError>) -> Self {
+        Error {
+            msg: Some(msg.into()),
+            inner: error,
+            kind: ErrorKind::LockHeld,
+        }
+    }
+
     pub fn is_lock_held(&self) -> bool {
         self.kind == ErrorKind::LockHeld
     }
