@@ -2,15 +2,19 @@ use super::{Error, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use http::HeaderMap;
 use reqwest::Client;
-use rsa::pkcs8::DecodePrivateKey;
-use rustls::sign::Signer;
-use rustls_pemfile::Item;
+use rsa::{pkcs1v15::SigningKey, pkcs8::DecodePrivateKey, sha2::Sha256, signature::SignerMut};
 use serde::{Deserialize, Serialize};
 use tokio::time::{self, Duration};
 
 const GCE_METADATA_HOST_ENV: &str = "GCE_METADATA_HOST";
 const GCE_METADATA_HOST_DNS: &str = "metadata.google.internal";
 const DEFAULT_GCE_METADATA_HOST: &str = "169.254.169.254";
+
+#[derive(Deserialize)]
+struct Token {
+    pub access_token: String,
+    pub expires_in: i64,
+}
 
 fn _new_metadata_client() -> Client {
     let mut headers = HeaderMap::with_capacity(2);
@@ -41,13 +45,7 @@ async fn is_running_on_gce() -> bool {
     false
 }
 
-#[derive(Deserialize)]
-struct ComputeToken {
-    pub access_token: String,
-    pub expires_in: i64,
-}
-
-async fn fetch_compute_access_token() -> Result<ComputeToken> {
+async fn fetch_compute_access_token() -> Result<Token> {
     let suffix = format!("instance/service-accounts/default/token");
     let query = &[("scopes", "https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/devstorage.full_control")];
     let host = std::env::var(GCE_METADATA_HOST_ENV)
@@ -70,7 +68,7 @@ async fn fetch_compute_access_token() -> Result<ComputeToken> {
     })
     .await?;
 
-    let token_response: ComputeToken = serde_json::from_str(resp.as_str()).map_err(Error::wrap)?;
+    let token_response: Token = serde_json::from_str(resp.as_str()).map_err(Error::wrap)?;
     if token_response.expires_in == 0 || token_response.access_token.is_empty() {
         return Err(Error::new("incomplete token received from metadata"));
     }
@@ -89,18 +87,8 @@ struct ServiceAccountKeyFile {
     project_id: String,
 }
 
-/// The response of a Service Account Key token exchange.
-#[derive(Deserialize)]
-struct ServiceAccountToken {
-    access_token: String,
-    token_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id_token: Option<String>,
-    expires_in: i64,
-}
-
 #[derive(Serialize)]
-pub struct JwsClaims<'a> {
+struct JwsClaims<'a> {
     pub iss: &'a str,
     pub scope: &'a str,
     pub aud: &'a str,
@@ -109,15 +97,8 @@ pub struct JwsClaims<'a> {
     pub sub: &'a str,
 }
 
-impl JwsClaims<'_> {
-    pub fn encode(&mut self) -> Result<String> {
-        let json = serde_json::to_string(&self).map_err(Error::wrap)?;
-        Ok(URL_SAFE_NO_PAD.encode(json))
-    }
-}
-
 #[derive(Serialize)]
-pub struct JwsHeader<'a> {
+struct JwsHeader<'a> {
     pub alg: &'a str,
     pub typ: &'a str,
     pub kid: &'a str,
@@ -134,24 +115,16 @@ impl ServiceAccountKeyFile {
         Ok(key_file)
     }
 
-    async fn fetch_service_account_token() -> Result<ServiceAccountToken> {
-        let client = Client::new();
-        let key_file = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").map_err(|_| {
-            Error::new("please set GOOGLE_APPLICATION_CREDENTIALS to service account")
-        })?;
-        let key_file = std::fs::read_to_string(key_file).map_err(Error::wrap)?;
-        let key_file: ServiceAccountKeyFile =
-            serde_json::from_str(key_file.as_str()).map_err(Error::wrap)?;
-
-        Err(Error::new("something"))
+    async fn fetch_service_account_token() -> Result<Token> {
+        Err(Error::new("not implemented"))
     }
 
-    fn signer(&self) -> Result<String> {
+    fn self_signed_token(&self) -> Result<Token> {
         let key =
             rsa::RsaPrivateKey::from_pkcs8_pem(&self.private_key).map_err(|e| Error::wrap(e))?;
 
         let now = chrono::Utc::now();
-        let mut claims = JwsClaims {
+        let claims = JwsClaims {
             iss: &self.client_email,
             sub:  &self.client_email,
             scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.full_control",
@@ -171,13 +144,14 @@ impl ServiceAccountKeyFile {
         let json = serde_json::to_string(&header).map_err(Error::wrap)?;
         let encoded_header = URL_SAFE_NO_PAD.encode(json);
 
+        // Sign the things
         let ss = format!("{}.{}", encoded_header, encoded_claims);
-        let sig = key
-            .sign(
-                rsa::pkcs1v15::Pkcs1v15Sign::new(),
-                ss.as_bytes(),
-            )
-            .map_err(|_| Error::new("unable to sign bytes"))?;
-        Ok(format!("{}.{}", ss, URL_SAFE_NO_PAD.encode(sig)))
+        let sig = SigningKey::<Sha256>::new(key).sign(ss.as_bytes());
+        let tok = format!("{}.{}", ss, URL_SAFE_NO_PAD.encode(sig.to_string()));
+
+        Ok(Token {
+            access_token: tok,
+            expires_in: 3600,
+        })
     }
 }
