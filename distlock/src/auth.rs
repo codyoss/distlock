@@ -2,6 +2,7 @@ use super::{Error, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use http::HeaderMap;
 use reqwest::Client;
+use rsa::pkcs8::DecodePrivateKey;
 use rustls::sign::Signer;
 use rustls_pemfile::Item;
 use serde::{Deserialize, Serialize};
@@ -101,27 +102,15 @@ struct ServiceAccountToken {
 #[derive(Serialize)]
 pub struct JwsClaims<'a> {
     pub iss: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<&'a str>,
+    pub scope: &'a str,
     pub aud: &'a str,
-    pub exp: Option<i64>,
-    pub iat: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub typ: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sub: Option<&'a str>,
+    pub exp: i64,
+    pub iat: i64,
+    pub sub: &'a str,
 }
 
 impl JwsClaims<'_> {
     pub fn encode(&mut self) -> Result<String> {
-        let now = chrono::Utc::now() - chrono::Duration::seconds(10);
-        self.iat = self.iat.or_else(|| Some(now.timestamp()));
-        self.exp = self
-            .iat
-            .or_else(|| Some((now + chrono::Duration::hours(1)).timestamp()));
-        if self.exp.unwrap() < self.iat.unwrap() {
-            return Err(Error::new("exp must be later than iat"));
-        }
         let json = serde_json::to_string(&self).map_err(Error::wrap)?;
         Ok(URL_SAFE_NO_PAD.encode(json))
     }
@@ -131,15 +120,7 @@ impl JwsClaims<'_> {
 pub struct JwsHeader<'a> {
     pub alg: &'a str,
     pub typ: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kid: Option<&'a str>,
-}
-
-impl JwsHeader<'_> {
-    pub fn encode(&self) -> Result<String> {
-        let json = serde_json::to_string(&self).map_err(Error::wrap)?;
-        Ok(URL_SAFE_NO_PAD.encode(json))
-    }
+    pub kid: &'a str,
 }
 
 impl ServiceAccountKeyFile {
@@ -165,44 +146,37 @@ impl ServiceAccountKeyFile {
         Err(Error::new("something"))
     }
 
-    fn signer(&self) -> Result<Box<dyn Signer>> {
-        let pk = rustls_pemfile::read_one(&mut self.private_key.as_bytes())
-            .map_err(|e| Error::wrap(e))?
-            .ok_or_else(|| Error::new("unable to parse service account key"))?;
-        let pk = match pk {
-            Item::Pkcs1Key(item) => item.,
-            Item::Pkcs8Key(item) => item,
-            other => {
-                return Err(Error::new(format!(
-                    "expected key to be in form of RSA or PKCS8, found {:?}",
-                    other
-                )))
-            }
-        };
-        rustls::sign::Signer::sign(&self, message)
-        let signer = rustls::sign::RsaSigningKey::new(&rustls::PrivateKey(pk))
-            .map_err(|e| Error::wrap_msg("unable to create signer", e))?
-            .choose_scheme(&[rustls::SignatureScheme::RSA_PKCS1_SHA256])
-            .ok_or_else(|| Error::new("invalid signing scheme"))?;
+    fn signer(&self) -> Result<String> {
+        let key =
+            rsa::RsaPrivateKey::from_pkcs8_pem(&self.private_key).map_err(|e| Error::wrap(e))?;
 
+        let now = chrono::Utc::now();
         let mut claims = JwsClaims {
-            iss: self.client_email.as_str(),
-            scope: Some("https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.full_control"),
-            aud: self.token_uri.as_str(),
-            exp: None,
-            iat: None,
-            sub: None,
-            typ: None,
+            iss: &self.client_email,
+            sub:  &self.client_email,
+            scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.full_control",
+            aud: &self.token_uri,
+            exp: (now + chrono::Duration::hours(1)).timestamp(),
+            iat: now.timestamp(),
         };
         let header = JwsHeader {
             alg: "RS256",
             typ: "JWT",
-            kid: None,
+            kid: &self.private_key_id,
         };
 
-        let ss = format!("{}.{}", header.encode()?, claims.encode()?);
-        let sig = signer
-            .sign(ss.as_bytes())
+        // encode all the things
+        let json = serde_json::to_string(&claims).map_err(Error::wrap)?;
+        let encoded_claims = URL_SAFE_NO_PAD.encode(json);
+        let json = serde_json::to_string(&header).map_err(Error::wrap)?;
+        let encoded_header = URL_SAFE_NO_PAD.encode(json);
+
+        let ss = format!("{}.{}", encoded_header, encoded_claims);
+        let sig = key
+            .sign(
+                rsa::pkcs1v15::Pkcs1v15Sign::new(),
+                ss.as_bytes(),
+            )
             .map_err(|_| Error::new("unable to sign bytes"))?;
         Ok(format!("{}.{}", ss, URL_SAFE_NO_PAD.encode(sig)))
     }
