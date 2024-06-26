@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use super::{Error, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -48,7 +50,7 @@ pub(crate) fn new_token_provider() -> Result<Box<dyn TokenProvider>> {
     Ok(Box::new(sa))
 }
 
-fn _new_metadata_client() -> Client {
+fn new_metadata_client() -> Client {
     let mut headers = HeaderMap::with_capacity(2);
     headers.insert("Metadata-Flavor", "Google".parse().unwrap());
     Client::builder().default_headers(headers).build().unwrap()
@@ -58,7 +60,7 @@ async fn is_running_on_gce() -> bool {
     if std::env::var(GCE_METADATA_HOST_ENV).is_ok() {
         return true;
     }
-    let client = _new_metadata_client();
+    let client = new_metadata_client();
     let res1 = client.get("http://169.254.169.254").send();
     let res2 = tokio::net::TcpListener::bind((GCE_METADATA_HOST_DNS, 0));
 
@@ -129,17 +131,14 @@ impl ServiceAccountKeyFile {
             serde_json::from_str(key_file.as_str()).map_err(Error::wrap)?;
         Ok(key_file)
     }
-}
 
-#[async_trait]
-impl TokenProvider for ServiceAccountKeyFile {
-    async fn fetch_token(&self) -> Result<Token> {
+    async fn self_signed_token(&self) -> Result<Token> {
         let now = chrono::Utc::now();
         let claims = JwsClaims {
                 iss: &self.client_email,
                 sub:  &self.client_email,
                 scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.full_control",
-                aud: &self.token_uri,
+                aud: "https://storage.googleapis.com/",
                 exp: (now + chrono::Duration::hours(1)).timestamp(),
                 iat: now.timestamp(),
             };
@@ -173,5 +172,12 @@ impl TokenProvider for ServiceAccountKeyFile {
             access_token: tok,
             expires_in: 3600,
         })
+    }
+}
+
+#[async_trait]
+impl TokenProvider for ServiceAccountKeyFile {
+    async fn fetch_token(&self) -> Result<Token> {
+        Err(Error::new("not implemented"))
     }
 }

@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use std::error::Error as StdError;
 
 mod auth;
@@ -112,29 +114,6 @@ impl Lock {
         Ok(LockMetadata {})
     }
 
-    pub async fn get_secret(&self, name: impl Into<String>) -> Result<String> {
-        let name = name.into();
-
-        // Make a call to google cloud secret manager to get a secret with the
-        // given name.
-
-        let tok = self.token_provider.fetch_token().await?;
-
-        let resp = self
-            .client
-            .get(&format!(
-                "https://secretmanager.googleapis.com/v1/projects/codyoss-playground/secrets/{}",
-                name
-            ))
-            .bearer_auth(tok.access_token)
-            .send()
-            .await
-            .map_err(|e| Error::wrap(e))?;
-        println!("{}", resp.status());
-        println!("{}", resp.text().await.unwrap());
-        Ok("".into())
-    }
-
     pub async fn unlock(name: String) -> Option<Error> {
         None
     }
@@ -177,6 +156,6 @@ mod tests {
     #[test]
     async fn test_refresher_returns_same_value() {
         let lock = Lock::builder().gcs_bucket("codyoss-playground").build();
-        let metadata = lock.get_secret("test").await.unwrap();
+        let metadata = lock.lock("test").await.unwrap();
     }
 }
