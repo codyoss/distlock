@@ -1,8 +1,13 @@
 use super::{Error, Result};
+use async_trait::async_trait;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use http::HeaderMap;
 use reqwest::Client;
-use rsa::{pkcs1v15::SigningKey, pkcs8::DecodePrivateKey, sha2::Sha256, signature::SignerMut};
+
+use rsa::sha2::Sha256;
+use rsa::signature::{RandomizedSigner, SignatureEncoding};
+use rsa::{pkcs1v15::SigningKey, pkcs8::DecodePrivateKey, RsaPrivateKey};
+
 use serde::{Deserialize, Serialize};
 use tokio::time::{self, Duration};
 
@@ -11,9 +16,36 @@ const GCE_METADATA_HOST_DNS: &str = "metadata.google.internal";
 const DEFAULT_GCE_METADATA_HOST: &str = "169.254.169.254";
 
 #[derive(Deserialize)]
-struct Token {
+pub(crate) struct Token {
     pub access_token: String,
     pub expires_in: i64,
+}
+
+#[derive(Serialize)]
+struct JwsClaims<'a> {
+    pub iss: &'a str,
+    pub scope: &'a str,
+    pub aud: &'a str,
+    pub exp: i64,
+    pub iat: i64,
+    pub sub: &'a str,
+}
+
+#[derive(Serialize)]
+struct JwsHeader<'a> {
+    pub alg: &'a str,
+    pub typ: &'a str,
+    pub kid: &'a str,
+}
+
+#[async_trait]
+pub(crate) trait TokenProvider: Send {
+    async fn fetch_token(&self) -> Result<Token>;
+}
+
+pub(crate) fn new_token_provider() -> Result<Box<dyn TokenProvider>> {
+    let sa = ServiceAccountKeyFile::new()?;
+    Ok(Box::new(sa))
 }
 
 fn _new_metadata_client() -> Client {
@@ -87,51 +119,30 @@ struct ServiceAccountKeyFile {
     project_id: String,
 }
 
-#[derive(Serialize)]
-struct JwsClaims<'a> {
-    pub iss: &'a str,
-    pub scope: &'a str,
-    pub aud: &'a str,
-    pub exp: i64,
-    pub iat: i64,
-    pub sub: &'a str,
-}
-
-#[derive(Serialize)]
-struct JwsHeader<'a> {
-    pub alg: &'a str,
-    pub typ: &'a str,
-    pub kid: &'a str,
-}
-
 impl ServiceAccountKeyFile {
     fn new() -> Result<Self> {
         let key_file = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").map_err(|_| {
-            Error::new("please set GOOGLE_APPLICATION_CREDENTIALS to service account")
+            Error::new("please set GOOGLE_APPLICATION_CREDENTIALS to service account file")
         })?;
         let key_file = std::fs::read_to_string(key_file).map_err(Error::wrap)?;
         let key_file: ServiceAccountKeyFile =
             serde_json::from_str(key_file.as_str()).map_err(Error::wrap)?;
         Ok(key_file)
     }
+}
 
-    async fn fetch_service_account_token() -> Result<Token> {
-        Err(Error::new("not implemented"))
-    }
-
-    fn self_signed_token(&self) -> Result<Token> {
-        let key =
-            rsa::RsaPrivateKey::from_pkcs8_pem(&self.private_key).map_err(|e| Error::wrap(e))?;
-
+#[async_trait]
+impl TokenProvider for ServiceAccountKeyFile {
+    async fn fetch_token(&self) -> Result<Token> {
         let now = chrono::Utc::now();
         let claims = JwsClaims {
-            iss: &self.client_email,
-            sub:  &self.client_email,
-            scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.full_control",
-            aud: &self.token_uri,
-            exp: (now + chrono::Duration::hours(1)).timestamp(),
-            iat: now.timestamp(),
-        };
+                iss: &self.client_email,
+                sub:  &self.client_email,
+                scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.full_control",
+                aud: &self.token_uri,
+                exp: (now + chrono::Duration::hours(1)).timestamp(),
+                iat: now.timestamp(),
+            };
         let header = JwsHeader {
             alg: "RS256",
             typ: "JWT",
@@ -143,11 +154,20 @@ impl ServiceAccountKeyFile {
         let encoded_claims = URL_SAFE_NO_PAD.encode(json);
         let json = serde_json::to_string(&header).map_err(Error::wrap)?;
         let encoded_header = URL_SAFE_NO_PAD.encode(json);
+        let ss = format!("{}.{}", encoded_header, encoded_claims);
 
         // Sign the things
-        let ss = format!("{}.{}", encoded_header, encoded_claims);
-        let sig = SigningKey::<Sha256>::new(key).sign(ss.as_bytes());
-        let tok = format!("{}.{}", ss, URL_SAFE_NO_PAD.encode(sig.to_string()));
+        let key = RsaPrivateKey::from_pkcs8_pem(&self.private_key).map_err(|e| Error::wrap(e))?;
+        let signing_key = SigningKey::<Sha256>::new(key);
+        let mut rng = rand::thread_rng();
+        let signature = signing_key.sign_with_rng(&mut rng, &ss.as_bytes());
+
+        // change to sig
+        let tok = format!(
+            "{}.{}",
+            ss,
+            URL_SAFE_NO_PAD.encode(signature.to_bytes().as_ref())
+        );
 
         Ok(Token {
             access_token: tok,

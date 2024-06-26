@@ -76,6 +76,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Lock {
     client: reqwest::Client,
     bucket: String,
+    token_provider: Box<dyn auth::TokenProvider>,
 }
 
 impl Lock {
@@ -83,8 +84,55 @@ impl Lock {
         LockBuilder::new()
     }
 
-    pub async fn lock(name: String) -> Result<LockMetadata> {
+    pub async fn lock(&self, name: impl Into<String>) -> Result<LockMetadata> {
+        let name = name.into();
+
+        let query = [
+            ("uploadType", "media"),
+            ("ifGenerationMatch", "0"),
+            ("name", &name),
+        ];
+
+        let tok = self.token_provider.fetch_token().await?;
+
+        let resp = self
+            .client
+            .post(&format!(
+                "https://storage.googleapis.com/upload/storage/v1/b/{}/o/{}",
+                self.bucket, &name
+            ))
+            .query(&query)
+            .bearer_auth(tok.access_token)
+            .body("lock")
+            .send()
+            .await
+            .map_err(|e| Error::wrap(e))?;
+        println!("{}", resp.status());
+        println!("{}", resp.text().await.unwrap());
         Ok(LockMetadata {})
+    }
+
+    pub async fn get_secret(&self, name: impl Into<String>) -> Result<String> {
+        let name = name.into();
+
+        // Make a call to google cloud secret manager to get a secret with the
+        // given name.
+
+        let tok = self.token_provider.fetch_token().await?;
+
+        let resp = self
+            .client
+            .get(&format!(
+                "https://secretmanager.googleapis.com/v1/projects/codyoss-playground/secrets/{}",
+                name
+            ))
+            .bearer_auth(tok.access_token)
+            .send()
+            .await
+            .map_err(|e| Error::wrap(e))?;
+        println!("{}", resp.status());
+        println!("{}", resp.text().await.unwrap());
+        Ok("".into())
     }
 
     pub async fn unlock(name: String) -> Option<Error> {
@@ -113,6 +161,8 @@ impl LockBuilder {
         Lock {
             client: reqwest::Client::new(),
             bucket: self.gcs_bucket,
+            // TODO(codyoss): return a Result here
+            token_provider: auth::new_token_provider().unwrap(),
         }
     }
 }
@@ -123,8 +173,10 @@ pub struct LockMetadata {}
 mod tests {
     use super::*;
 
+    #[tokio::main]
     #[test]
-    fn it_works() {
-        assert!(true)
+    async fn test_refresher_returns_same_value() {
+        let lock = Lock::builder().gcs_bucket("codyoss-playground").build();
+        let metadata = lock.get_secret("test").await.unwrap();
     }
 }
