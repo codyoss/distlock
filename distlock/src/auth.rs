@@ -86,7 +86,7 @@ async fn fetch_compute_access_token() -> Result<Token> {
         .unwrap_or_else(|_| -> String { String::from(DEFAULT_GCE_METADATA_HOST) });
     let suffix = suffix.trim_start_matches('/');
 
-    let client = _new_metadata_client();
+    let client = new_metadata_client();
     let resp = backoff::future::retry(backoff::ExponentialBackoff::default(), || async {
         let url = format!("http://{}/computeMetadata/v1/{}", host, suffix);
         let req = client.get(url).query(query);
@@ -107,6 +107,12 @@ async fn fetch_compute_access_token() -> Result<Token> {
         return Err(Error::new("incomplete token received from metadata"));
     }
     Ok(token_response)
+}
+
+#[derive(Serialize)]
+struct TokenRequest {
+    grant_type: String,
+    assertion: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -132,7 +138,7 @@ impl ServiceAccountKeyFile {
         Ok(key_file)
     }
 
-    async fn self_signed_token(&self) -> Result<Token> {
+    async fn sign_jwt(&self) -> Result<String> {
         let now = chrono::Utc::now();
         let claims = JwsClaims {
                 iss: &self.client_email,
@@ -161,23 +167,36 @@ impl ServiceAccountKeyFile {
         let mut rng = rand::thread_rng();
         let signature = signing_key.sign_with_rng(&mut rng, &ss.as_bytes());
 
-        // change to sig
-        let tok = format!(
+        Ok(format!(
             "{}.{}",
             ss,
             URL_SAFE_NO_PAD.encode(signature.to_bytes().as_ref())
-        );
-
-        Ok(Token {
-            access_token: tok,
-            expires_in: 3600,
-        })
+        ))
     }
 }
 
 #[async_trait]
 impl TokenProvider for ServiceAccountKeyFile {
     async fn fetch_token(&self) -> Result<Token> {
-        Err(Error::new("not implemented"))
+        let payload = self.sign_jwt().await?;
+        let client = reqwest::Client::new();
+        let res = client
+            .post(self.token_uri)
+            .form(&TokenRequest {
+                grant_type: DEFAULT_OAUTH_GRANT.into(),
+                assertion: payload,
+            })
+            .send()
+            .await
+            .map_err(|_| Error::new("unable to make request to oauth endpoint"))?;
+        if !res.status().is_success() {
+            return Err(Error::new(format!(
+                "bad request with status: {}",
+                res.status()
+            )));
+        }
+        let token_response: Token = res.json().await.map_err(Error::wrap)?;
+
+        Ok(token_response)
     }
 }
