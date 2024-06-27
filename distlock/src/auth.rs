@@ -27,7 +27,6 @@ pub(crate) struct Token {
 struct JwsClaims<'a> {
     pub iss: &'a str,
     pub scope: &'a str,
-    pub aud: &'a str,
     pub exp: i64,
     pub iat: i64,
     pub sub: &'a str,
@@ -132,6 +131,11 @@ impl ServiceAccountKeyFile {
         let key_file = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").map_err(|_| {
             Error::new("please set GOOGLE_APPLICATION_CREDENTIALS to service account file")
         })?;
+        if key_file == "" {
+            return Err(Error::new(
+                "please set GOOGLE_APPLICATION_CREDENTIALS to service account file",
+            ));
+        }
         let key_file = std::fs::read_to_string(key_file).map_err(Error::wrap)?;
         let key_file: ServiceAccountKeyFile =
             serde_json::from_str(key_file.as_str()).map_err(Error::wrap)?;
@@ -144,7 +148,6 @@ impl ServiceAccountKeyFile {
                 iss: &self.client_email,
                 sub:  &self.client_email,
                 scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.full_control",
-                aud: "https://storage.googleapis.com/",
                 exp: (now + chrono::Duration::hours(1)).timestamp(),
                 iat: now.timestamp(),
             };
@@ -181,9 +184,9 @@ impl TokenProvider for ServiceAccountKeyFile {
         let payload = self.sign_jwt().await?;
         let client = reqwest::Client::new();
         let res = client
-            .post(self.token_uri)
+            .post(&self.token_uri)
             .form(&TokenRequest {
-                grant_type: DEFAULT_OAUTH_GRANT.into(),
+                grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer".into(),
                 assertion: payload,
             })
             .send()
