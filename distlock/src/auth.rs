@@ -30,6 +30,7 @@ struct JwsClaims<'a> {
     pub exp: i64,
     pub iat: i64,
     pub sub: &'a str,
+    pub aud: &'a str,
 }
 
 #[derive(Serialize)]
@@ -145,6 +146,7 @@ impl ServiceAccountKeyFile {
     async fn sign_jwt(&self) -> Result<String> {
         let now = chrono::Utc::now();
         let claims = JwsClaims {
+                aud: &self.token_uri,
                 iss: &self.client_email,
                 sub:  &self.client_email,
                 scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/devstorage.full_control",
@@ -195,7 +197,7 @@ impl TokenProvider for ServiceAccountKeyFile {
         if !res.status().is_success() {
             return Err(Error::new(format!(
                 "bad request with status: {}",
-                res.status()
+                res.status(),
             )));
         }
         let token_response: Token = res.json().await.map_err(Error::wrap)?;

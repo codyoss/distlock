@@ -88,8 +88,8 @@ impl Lock {
 
     pub async fn lock(&self, name: impl Into<String>) -> Result<LockMetadata> {
         let name = name.into();
-
-        let query = [
+        // TODO: switch this to multipart and upload a custom timestamp
+        let query: [(&str, &str); 3] = [
             ("uploadType", "media"),
             ("ifGenerationMatch", "0"),
             ("name", &name),
@@ -100,10 +100,11 @@ impl Lock {
         let resp = self
             .client
             .post(&format!(
-                "https://storage.googleapis.com/upload/storage/v1/b/{}/o/{}",
-                self.bucket, &name
+                "https://storage.googleapis.com/upload/storage/v1/b/{}/o",
+                self.bucket,
             ))
             .query(&query)
+            .header("content-type", "text/plain")
             .bearer_auth(tok.access_token)
             .body("lock")
             .send()
@@ -156,6 +157,6 @@ mod tests {
     #[test]
     async fn test_refresher_returns_same_value() {
         let lock = Lock::builder().gcs_bucket("codyoss-playground").build();
-        let metadata = lock.lock("test").await.unwrap();
+        let metadata = lock.lock("test2").await.unwrap();
     }
 }
