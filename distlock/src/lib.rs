@@ -1,5 +1,7 @@
 #![allow(unused)]
 
+use reqwest::multipart::{Form, Part};
+use serde::{Deserialize, Serialize};
 use std::error::Error as StdError;
 
 mod auth;
@@ -81,6 +83,14 @@ pub struct Lock {
     token_provider: Box<dyn auth::TokenProvider>,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ObjectMetadata {
+    bucket: String,
+    custom_time: String,
+    name: String,
+}
+
 impl Lock {
     pub fn builder() -> LockBuilder {
         LockBuilder::new()
@@ -95,6 +105,20 @@ impl Lock {
             ("name", &name),
         ];
 
+        let metadata = ObjectMetadata {
+            bucket: self.bucket.clone(),
+            custom_time: chrono::Utc::now().to_rfc3339(),
+            name: name.clone(),
+        };
+
+        let metadata = serde_json::to_vec(&metadata).map_err(Error::wrap)?;
+        let mut content_headers = http::HeaderMap::with_capacity(1);
+        content_headers.insert("Content-Type", "text/plain; charset=utf-8".parse().unwrap());
+
+        let form = Form::new()
+            .part("body", Part::bytes(metadata).mime_str("application/json").map_err(Error::wrap)?)
+            .part("media", Part::text("lock").headers(content_headers));
+
         let tok = self.token_provider.fetch_token().await?;
 
         let resp = self
@@ -104,9 +128,8 @@ impl Lock {
                 self.bucket,
             ))
             .query(&query)
-            .header("content-type", "text/plain")
             .bearer_auth(tok.access_token)
-            .body("lock")
+            .multipart(form)
             .send()
             .await
             .map_err(|e| Error::wrap(e))?;
